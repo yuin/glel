@@ -11,7 +11,7 @@ glel is an expression evaluation engine for Go using [GopherLua](http://github.c
 
 - **Safe** : glel evaluates expressions in sandboxed environment.
 - **Flexible** : You can write expressions in Lua, most widely used embedded language. 
-- **Fast** : glel uses [GopherLua] as a Lua interperter. GopherLua is a resonably fast for scripting and been used for many years in [many projects](https://pkg.go.dev/github.com/yuin/gopher-lua?tab=importedby)
+- **Fast** : glel uses [GopherLua](http://github.com/yuin/gopher-lua) as a Lua interperter. GopherLua is a resonably fast for scripting and been used for many years in [many projects](https://pkg.go.dev/github.com/yuin/gopher-lua?tab=importedby)
 - **Easy to use** : glel integrates Go and Lua using [gopher-luar](https://github.com/layeh/gopher-luar). Values are automatically converted for the languages.
 
 ## Usage
@@ -59,7 +59,7 @@ glel pools Lua interpreters for performance. You can set pool size using `WithPo
     ok, err = evaler.EvalContextBool(ctx, nil)
 ```
 
-`expr` is a goroutine safe. You can use one `expr` from multiple goroutines. `evaler` can be cached. Note that you **must not** closes `expr` before `evaler` evaluetes.
+`expr` is a goroutine safe. You can use one `expr` from multiple goroutines. `evaler` can be cached. Note that you **must not** closes `expr` before `evaler` evaluates.
 
 License
 --------------------

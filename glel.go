@@ -68,7 +68,7 @@ if __envfunc then
 end
 
 function sandbox_call(f, nenv)
-  local env = __merge(nenv or {}, BASE_ENV)
+  local env = setmetatable(nenv or {}, {__index = BASE_ENV})
   env._G = env._G or env
   setfenv(f, env)
   local ok, result = pcall(f)
@@ -86,23 +86,24 @@ type lStatePool interface {
 }
 
 type nocacheLStatePool struct {
-	factory func() *lua.LState
+	lstate *lua.LState
 }
 
 func newNocacheLStatePool(factory func() *lua.LState) lStatePool {
 	return &nocacheLStatePool{
-		factory: factory,
+		lstate: factory(),
 	}
 }
 
 func (pl *nocacheLStatePool) Get() *lua.LState {
-	return pl.factory()
+	return pl.lstate
 }
 
 func (pl *nocacheLStatePool) Put(_ *lua.LState) {
 }
 
 func (pl *nocacheLStatePool) Shutdown() {
+	pl.lstate.Close()
 }
 
 type syncLStatePool struct {
@@ -149,6 +150,9 @@ func (pl *syncLStatePool) Shutdown() {
 
 // ExprConfig is a configurations for [Expr].
 type ExprConfig struct {
+	// DisableSandbox disables sandboxing.
+	DisableSandbox bool
+
 	// PoolSize is a size of the Lua VM pool.
 	// This defaults to 50.
 	// Pooling is disabled if size is a nevative value.
@@ -175,6 +179,13 @@ type ExprConfig struct {
 
 // ExprOption is an option for [Expr].
 type ExprOption func(*ExprConfig)
+
+// WithDisableSandbox disables a sandboxing.
+func WithDisableSandbox() ExprOption {
+	return func(cfg *ExprConfig) {
+		cfg.DisableSandbox = true
+	}
+}
 
 // WithPoolSize is a size of the Lua VM pool.
 // This defaults to 50.
@@ -249,22 +260,44 @@ type Evaler interface {
 }
 
 type evaler struct {
-	proto *lua.FunctionProto
-	lpool lStatePool
+	sandbox bool
+	proto   *lua.FunctionProto
+	fn      *lua.LFunction
+	lpool   lStatePool
 }
 
 func (e *evaler) eval(lstate *lua.LState, env Env) (lua.LValue, error) {
-	ltbl := lstate.NewTable()
-	for key, value := range env {
-		setTable(lstate, ltbl, key, value)
+	if e.fn == nil {
+		e.fn = lstate.NewFunctionFromProto(e.proto)
+	} else {
+		e.fn.Env = lstate.Env
 	}
-	lfunc := lstate.NewFunctionFromProto(e.proto)
-	if err := lstate.CallByParam(lua.P{
-		Fn:      lstate.GetGlobal("sandbox_call"),
-		NRet:    1,
-		Protect: true,
-	}, lfunc, ltbl); err != nil {
-		return nil, fixError(err)
+	if e.sandbox {
+		ltbl := lstate.NewTable()
+		for key, value := range env {
+			setTable(lstate, ltbl, key, value)
+		}
+		if err := lstate.CallByParam(lua.P{
+			Fn:      lstate.GetGlobal("sandbox_call"),
+			NRet:    1,
+			Protect: true,
+		}, e.fn, ltbl); err != nil {
+			return nil, fixError(err)
+		}
+	} else {
+		if env != nil {
+			ltbl := lstate.Get(lua.GlobalsIndex).(*lua.LTable)
+			for key, value := range env {
+				setTable(lstate, ltbl, key, value)
+			}
+		}
+		if err := lstate.CallByParam(lua.P{
+			Fn:      e.fn,
+			NRet:    1,
+			Protect: true,
+		}); err != nil {
+			return nil, fixError(err)
+		}
 	}
 	ret := lstate.Get(-1)
 	lstate.Pop(1)
@@ -306,16 +339,7 @@ func (e *evaler) EvalContextBool(ctx context.Context, env Env) (bool, error) {
 
 type expr struct {
 	lpool lStatePool
-}
-
-func merge(lstate *lua.LState) int {
-	dest := lstate.CheckTable(1)
-	source := lstate.CheckTable(2)
-	source.ForEach(func(key, value lua.LValue) {
-		lstate.SetTable(dest, key, value)
-	})
-	lstate.Push(dest)
-	return 1
+	cfg   *ExprConfig
 }
 
 // New creates new [Expr]
@@ -330,17 +354,29 @@ func New(opts ...ExprOption) Expr {
 
 	factory := func() *lua.LState {
 		lstate := lua.NewState(lua.Options{
-			CallStackSize:       32,
+			CallStackSize:       10,
 			RegistrySize:        128,
 			IncludeGoStackTrace: true,
 		})
-		lstate.SetGlobal("__merge", lstate.NewFunction(merge))
-		if cfg.EnvFunc != nil {
-			lstate.SetGlobal("__envfunc", lstate.NewFunction(cfg.EnvFunc))
-		}
-		err := lstate.DoString(strings.Replace(sandboxScript, "$$$", cfg.AllowedFunctions, 1))
-		if err != nil {
-			panic(err)
+		if !cfg.DisableSandbox {
+			if cfg.EnvFunc != nil {
+				lstate.SetGlobal("__envfunc", lstate.NewFunction(cfg.EnvFunc))
+			}
+			err := lstate.DoString(strings.Replace(sandboxScript, "$$$", cfg.AllowedFunctions, 1))
+			if err != nil {
+				panic(err)
+			}
+		} else {
+			if cfg.EnvFunc != nil {
+				if err := lstate.CallByParam(lua.P{
+					Fn:      lstate.NewFunction(cfg.EnvFunc),
+					NRet:    0,
+					Protect: true,
+				}, lstate.Get(lua.GlobalsIndex)); err != nil {
+					panic(err)
+				}
+
+			}
 		}
 		return lstate
 	}
@@ -353,6 +389,7 @@ func New(opts ...ExprOption) Expr {
 
 	return &expr{
 		lpool: lpool,
+		cfg:   cfg,
 	}
 }
 
@@ -366,7 +403,8 @@ func (e *expr) Compile(expr string) (Evaler, error) {
 	if err != nil {
 		return nil, fixError(err)
 	}
-	return &evaler{proto: proto, lpool: e.lpool}, nil
+	proto.IsVarArg = 0
+	return &evaler{sandbox: !e.cfg.DisableSandbox, proto: proto, lpool: e.lpool}, nil
 }
 
 func (e *expr) Close() {

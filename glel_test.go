@@ -84,3 +84,39 @@ func TestGlelContext(t *testing.T) {
 	}
 
 }
+
+func TestGlelDisableSandbox(t *testing.T) {
+	expr := New(
+		WithDisableSandbox(),
+		WithPoolSize(1),
+		WithEnv(Env{
+			"hoge": "foo",
+		}))
+	defer expr.Close()
+	evaler, err := expr.Compile(`hoge == "foo" and add(x, y) == 15 and string.rep("ab", 5) == "ababababab" and d.name == "alice" `)
+	if err != nil {
+		t.Fatal(err.Error())
+	}
+	d := &struct {
+		Name string
+	}{
+		Name: "alice",
+	}
+	result, err := evaler.EvalBool(Env{
+		"y": 10,
+		"x": lua.LNumber(5),
+		"d": d,
+		"add": func(a, b int) int {
+			return a + b
+		},
+	})
+
+	if err != nil {
+		t.Fatal(err.Error())
+	}
+
+	if !result {
+		t.Errorf("result should be true, but got %v", result)
+	}
+
+}
